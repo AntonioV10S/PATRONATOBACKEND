@@ -1,0 +1,32 @@
+{
+    "name": "talentohumano",
+    "version": "1.0",
+    "main": "app.js",
+    "type": "module",
+    "scripts": {
+        "test": "echo\"Error: no test especified\"&& exit 1",
+        "dev": "nodemon app.js"
+    },
+    "author": "Marco Antonio Vega",
+    "license": "ISC",
+    "dependencies": {
+        "@sequelize/postgres": "7.0.0-alpha.46",
+        "bcrypt": "^6.0.0",
+        "cors": "^2.8.6",
+        "crypto-js": "^4.2.0",
+        "dotenv": "^16.4.5",
+        "express": "^5.1.0",
+        "express-rate-limit": "^8.3.2",
+        "helmet": "^8.1.0",
+        "jsonwebtoken": "^9.0.3",
+        "multer": "^2.0.0",
+        "pdfkit": "^0.19.1",
+        "pg": "^8.13.1",
+        "pg-hstore": "^2.3.4",
+        "sequelize": "^6.37.5"
+    },
+    "devDependencies": {
+        "nodemon": "^3.1.14",
+        "sequelize-cli": "^6.6.5"
+    }
+}

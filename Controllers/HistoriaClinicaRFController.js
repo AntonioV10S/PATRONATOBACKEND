@@ -1,0 +1,279 @@
+import {
+    HistoriaClinicaRFModel,
+    ContenidoCifradoRFModel,
+    MedicoModel,
+    PacienteModel,
+    CitaModel,
+    RolModel,
+    DiagnosticoModel,
+    TratamientoModel,
+    LlaveEccModel
+} from '../Models/index.js';
+import { AsignacionModel } from '../Models/asignaciones.js';
+import { CryptoService } from '../utils/cryptoService.js';
+import {
+    obtenerLlavePublicaInstitucional,
+    obtenerLlavePrivadaInstitucional,
+} from '../utils/institutionalKeys.js';
+import { sequelize } from '../db/conexion.js';
+import { Op } from 'sequelize';
+
+export const HistoriaClinicaRFController = {
+
+    // POST /historia-rf
+    store: async (req, res) => {
+        const t = await sequelize.transaction();
+        try {
+            const {
+                id_paciente, id_tratamiento, id_diagnostico, lugar_atencion,
+                certificado, motivo_consulta, anamnesis, receta, fecha, edad,
+                llavePrivadaPem, grupo_atencion
+            } = req.body;
+
+            const id_medico = req.user.id_cuenta;
+
+            if (!llavePrivadaPem) {
+                await t.rollback();
+                return res.status(400).json({ message: "Se requiere la llave privada del médico para firmar la historia de RF." });
+            }
+
+            // Cifrar los bloques médicos narrativos y sensibles (ECDH + AES-256-GCM)
+            const datosParaProteger = {
+                motivo_consulta, anamnesis, receta,
+                fecha_atencion: new Date().toISOString()
+            };
+            const llavePublicaInstitucional = obtenerLlavePublicaInstitucional();
+            const payloadTexto = JSON.stringify(datosParaProteger);
+            const contenedorCifrado = CryptoService.cifrarConECDH(payloadTexto, llavePublicaInstitucional);
+
+            const hashIntegridad = CryptoService.calcularHashSHA256(contenedorCifrado);
+            const firmaECC = CryptoService.firmarHistoriaClinica(hashIntegridad, llavePrivadaPem);
+
+            // Se guarda la llave PÚBLICA activa del médico junto con el registro,
+            // no solo su id, para que el registro siga siendo verificable aunque
+            // el médico rote su llave privada más adelante.
+            const llaveActivaMedico = await LlaveEccModel.findOne({
+                where: { creado_por: id_medico, activa: true },
+                order: [['fecha_creacion', 'DESC']],
+                transaction: t
+            });
+
+            // Persistencia Base
+            const nuevaHC = await HistoriaClinicaRFModel.create({
+                id_paciente,
+                id_tratamiento,
+                id_diagnostico,
+                id_cuenta_auditoria: id_medico,
+                lugar_atencion,
+                certificado: certificado || false,
+                fecha: fecha || new Date().toISOString().split('T')[0],
+                edad,
+                firma_ecdsa: firmaECC,
+                hash_integridad: hashIntegridad,
+                llave_publica_pem: llaveActivaMedico ? llaveActivaMedico.llave_publica_pem : null
+            }, { transaction: t });
+
+            // Persistencia Satélite Satélite 1:1
+            await ContenidoCifradoRFModel.create({
+                id_historia_rf: nuevaHC.id_rf,
+                payload_clinico_rf: contenedorCifrado
+            }, { transaction: t });
+
+            // Actualizar Paciente
+            const paciente = await PacienteModel.findByPk(id_paciente, { transaction: t });
+            if (paciente) {
+                paciente.grupo_a_prioritaria = grupo_atencion;
+                await paciente.save({ transaction: t });
+            }
+
+            await t.commit();
+            return res.status(201).json({ result: "Datos guardados", code: '201' });
+
+        } catch (error) {
+            await t.rollback();
+            return res.status(500).json({ mensaje: "Error al guardar historia RF", error: error.message });
+        }
+    },
+
+    // GET /historia-rf/:id
+    show: async (req, res) => {
+        try {
+            const { id } = req.params;
+            const id_medico_consulta = req.user.id_cuenta;
+
+            const hc = await HistoriaClinicaRFModel.findByPk(id, {
+                include: [{ model: ContenidoCifradoRFModel, as: 'contenidoCifrado' }]
+            });
+
+            if (!hc) return res.status(404).json({ message: "Registro clínico no encontrado." });
+
+            // Ver el comentario equivalente en HistoriaClinicaController.js
+            if (String(hc.id_cuenta_auditoria) !== String(id_medico_consulta)) {
+                const rolConsultante = await RolModel.findByPk(req.user?.id_rol);
+                const esAdministrador = rolConsultante && rolConsultante.rol === 'Administrador';
+
+                if (!esAdministrador) {
+                    const hoy = new Date().toISOString().split('T')[0];
+                    const permisoActivo = await AsignacionModel.findOne({
+                        where: {
+                            id_medico_titular: hc.id_cuenta_auditoria,
+                            id_medico_reemplazo: id_medico_consulta,
+                            estado: true,
+                            fecha_inicio: { [Op.lte]: hoy },
+                            fecha_fin: { [Op.gte]: hoy }
+                        }
+                    });
+                    if (!permisoActivo) return res.status(403).json({ message: "Acceso denegado: No cuenta con asignación o reemplazo legal vigente para auditar este registro." });
+                }
+            }
+
+            const llavePrivadaInstitucional = obtenerLlavePrivadaInstitucional();
+            const datosDescifradosStr = CryptoService.descifrarConECDH(hc.contenidoCifrado.payload_clinico_rf, llavePrivadaInstitucional);
+
+            return res.json({
+                result: {
+                    ...hc.toJSON(),
+                    datos_sensibles: JSON.parse(datosDescifradosStr)
+                }
+            });
+        } catch (error) {
+            return res.status(500).json({ message: "Error al recuperar historia", error: error.message });
+        }
+    },
+
+    // GET /historia-rf/paciente/:id
+    ConsultasPacientesRF: async (req, res) => {
+        try {
+            const { id } = req.params;
+            const datos = await HistoriaClinicaRFModel.findAll({
+                where: { id_paciente: id },
+                include: [
+                    { model: PacienteModel, as: 'paciente' },
+                    { model: DiagnosticoModel, as: 'diagnostico' },
+                    { model: TratamientoModel, as: 'tratamientos' }
+                ]
+            });
+            if (datos.length !== 0) return res.json({ result: datos, code: '201' });
+            return res.json({ result: "Datos vacios", code: '202' });
+        } catch (error) {
+            return res.status(500).json({ error: error.message });
+        }
+    },
+
+    // GET /historia-rf/filtrar/fechas/:fechaInicial/:fechaFinal
+    FiltradoFecha: async (req, res) => {
+        try {
+            const { fechaInicial, fechaFinal } = req.params;
+            if (fechaInicial > fechaFinal) return res.json({ result: "Error en fechas", code: '203' });
+
+            const condicion = fechaInicial === fechaFinal ? { fecha: fechaInicial } : { fecha: { [Op.between]: [fechaInicial, fechaFinal] } };
+
+            const datos = await HistoriaClinicaRFModel.findAll({
+                where: condicion,
+                include: [
+                    { model: PacienteModel, as: 'paciente' },
+                    { model: TratamientoModel, as: 'tratamientos' }
+                ]
+            });
+
+            if (datos.length !== 0) return res.json({ result: datos, code: '201' });
+            return res.json({ result: "Datos vacios", code: '202' });
+        } catch (error) {
+            return res.status(500).json({ error: error.message });
+        }
+    },
+
+    // GET /historia-rf/estadisticas/:fechaInicial/:fechaFinal/:especialidad
+    DatosEstadisticos: async (req, res) => {
+        try {
+            const { fechaInicial, fechaFinal, especialidad } = req.params;
+
+            const historias = await HistoriaClinicaRFModel.findAll({
+                where: { fecha: { [Op.between]: [fechaInicial, fechaFinal] } },
+                include: [{ model: PacienteModel, as: 'paciente' }]
+            });
+
+            let patro = 0, domi = 0, cont = 0, contH = 0, contM = 0;
+            const diaslab = [];
+
+            historias.forEach(item => {
+                if (item.lugar_atencion === 'Patronato') patro++;
+                else domi++;
+
+                if (item.paciente?.gad === true) cont++;
+                if (item.paciente?.sexo === 'Hombre') contH++;
+                if (item.paciente?.sexo === 'Mujer') contM++;
+                if (!diaslab.includes(item.fecha)) diaslab.push(item.fecha);
+            });
+
+            let TotalcitasPendientes = 0;
+            const citas = await CitaModel.findAll({ include: ['turno'] });
+            const roles = await RolModel.findAll();
+
+            citas.forEach(cita => {
+                if (cita.turno) {
+                    const rol = roles.find(r => r.id_rol === cita.turno.id_rol);
+                    if (rol?.rol === especialidad) TotalcitasPendientes++;
+                }
+            });
+
+            return res.json({
+                totalP: historias.length,
+                totalC: TotalcitasPendientes,
+                totalG: cont,
+                totalH: contH,
+                totalM: contM,
+                patronato: patro,
+                domicilio: domi,
+                horas: diaslab.length
+            });
+        } catch (error) {
+            return res.status(500).json({ error: error.message });
+        }
+    },
+
+    // GET /rf/historias/verificar/:id -> Verificación forense (hash + firma ECDSA real)
+    verificarIntegridad: async (req, res) => {
+        try {
+            const { id } = req.params;
+            const hc = await HistoriaClinicaRFModel.findByPk(id, {
+                include: [{ model: ContenidoCifradoRFModel, as: 'contenidoCifrado' }]
+            });
+
+            if (!hc || !hc.contenidoCifrado) {
+                return res.status(404).json({ message: "Incapacidad de auditoría: Registro o criptograma faltante." });
+            }
+
+            const hashCalculado = CryptoService.calcularHashSHA256(hc.contenidoCifrado.payload_clinico_rf);
+            const hashIntegro = hashCalculado === hc.hash_integridad;
+
+            let firmaValida = false;
+            if (hc.llave_publica_pem && hc.firma_ecdsa) {
+                firmaValida = CryptoService.verificarFirma(hc.hash_integridad, hc.firma_ecdsa, hc.llave_publica_pem);
+            }
+
+            const integro = hashIntegro && firmaValida;
+
+            if (integro) {
+                return res.json({
+                    result: "Auditoría Exitosa: El expediente es totalmente íntegro, original y legítimo. Hash verificado y firma ECDSA válida.",
+                    code: '201',
+                    match: true,
+                    detalle: { hash_integro: hashIntegro, firma_valida: firmaValida }
+                });
+            } else {
+                let motivo = [];
+                if (!hashIntegro) motivo.push('el contenido cifrado fue alterado (hash no coincide)');
+                if (!firmaValida) motivo.push('la firma digital no es válida (no corresponde al médico firmante o al contenido)');
+                return res.status(400).json({
+                    result: `🚨 ¡ALERTA FORENSE!: ${motivo.join('; ')}.`,
+                    code: '202',
+                    match: false,
+                    detalle: { hash_integro: hashIntegro, firma_valida: firmaValida }
+                });
+            }
+        } catch (error) {
+            return res.status(500).json({ message: "Error en el motor de verificación forense", error: error.message });
+        }
+    }
+};
