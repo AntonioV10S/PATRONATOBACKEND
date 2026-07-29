@@ -304,5 +304,71 @@ export const HistoriaClinicaRFController = {
         } catch (error) {
             return res.status(500).json({ message: "Error en el motor de verificación forense", error: error.message });
         }
+    },
+
+    // GET /rf/historias/verificar-todas -> Auditoría masiva (solo Administrador)
+    // Ver el comentario equivalente en HistoriaClinicaController.js
+    verificarTodas: async (req, res) => {
+        try {
+            const historias = await HistoriaClinicaRFModel.findAll({
+                include: [
+                    { model: ContenidoCifradoRFModel, as: 'contenidoCifrado' },
+                    { model: PacienteModel, as: 'paciente', attributes: ['nombres', 'apellidos'] },
+                    { model: MedicoModel, as: 'medico', attributes: ['nombres'] }
+                ],
+                order: [['fecha', 'DESC']]
+            });
+
+            let llavePrivadaInstitucional = null;
+            try {
+                llavePrivadaInstitucional = obtenerLlavePrivadaInstitucional();
+            } catch (e) { /* se reporta por registro si falta */ }
+
+            const resultado = historias.map((hc) => {
+                const base = {
+                    id_rf: hc.id_rf,
+                    fecha: hc.fecha,
+                    paciente: hc.paciente ? `${hc.paciente.nombres} ${hc.paciente.apellidos}` : '—',
+                    medico: hc.medico?.nombres || '—'
+                };
+
+                if (!hc.contenidoCifrado) {
+                    return { ...base, estado: 'Sin contenido', detalle: 'No existe el bloque cifrado asociado.' };
+                }
+
+                const hashCalculado = CryptoService.calcularHashSHA256(hc.contenidoCifrado.payload_clinico_rf);
+                const hashIntegro = hashCalculado === hc.hash_integridad;
+                const firmaValida = (hc.llave_publica_pem && hc.firma_ecdsa)
+                    ? CryptoService.verificarFirma(hc.hash_integridad, hc.firma_ecdsa, hc.llave_publica_pem)
+                    : false;
+
+                if (!hashIntegro || !firmaValida) {
+                    const motivo = [];
+                    if (!hashIntegro) motivo.push('hash alterado');
+                    if (!firmaValida) motivo.push('firma inválida');
+                    return { ...base, estado: 'Alterado', detalle: motivo.join(', ') };
+                }
+
+                try {
+                    if (!llavePrivadaInstitucional) throw new Error('Llave institucional no configurada');
+                    CryptoService.descifrarConECDH(hc.contenidoCifrado.payload_clinico_rf, llavePrivadaInstitucional);
+                    return { ...base, estado: 'Íntegro', detalle: 'Hash correcto, firma válida, y descifrable con la llave actual.' };
+                } catch (e) {
+                    return { ...base, estado: 'No descifrable', detalle: 'Hash y firma correctos, pero no se puede leer con la llave institucional actual (posible pérdida de una llave anterior).' };
+                }
+            });
+
+            const resumen = {
+                total: resultado.length,
+                integros: resultado.filter(r => r.estado === 'Íntegro').length,
+                alterados: resultado.filter(r => r.estado === 'Alterado').length,
+                noDescifrables: resultado.filter(r => r.estado === 'No descifrable').length,
+                sinContenido: resultado.filter(r => r.estado === 'Sin contenido').length
+            };
+
+            return res.json({ resumen, result: resultado });
+        } catch (error) {
+            return res.status(500).json({ message: "Error en la auditoría masiva", error: error.message });
+        }
     }
 };
