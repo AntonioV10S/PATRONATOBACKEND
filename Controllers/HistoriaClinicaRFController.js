@@ -10,6 +10,7 @@ import {
     LlaveEccModel
 } from '../Models/index.js';
 import { AsignacionModel } from '../Models/asignaciones.js';
+import { descifrarPaciente } from './PacienteController.js';
 import { CryptoService } from '../utils/cryptoService.js';
 import {
     obtenerLlavePublicaInstitucional,
@@ -107,12 +108,15 @@ export const HistoriaClinicaRFController = {
 
             if (!hc) return res.status(404).json({ message: "Registro clínico no encontrado." });
 
-            // Ver el comentario equivalente en HistoriaClinicaController.js
+            // Ver el comentario equivalente en HistoriaClinicaController.js. Dentro
+            // de la misma especialidad, cualquier médico puede LEER el registro
+            // de un colega para corroborar antecedentes (nunca editar).
             if (String(hc.id_cuenta_auditoria) !== String(id_medico_consulta)) {
                 const rolConsultante = await RolModel.findByPk(req.user?.id_rol);
                 const esAdministrador = rolConsultante && rolConsultante.rol === 'Administrador';
+                const esMismaEspecialidad = rolConsultante && rolConsultante.rol === 'Rehabilitación Física';
 
-                if (!esAdministrador) {
+                if (!esAdministrador && !esMismaEspecialidad) {
                     const hoy = new Date().toISOString().split('T')[0];
                     const permisoActivo = await AsignacionModel.findOne({
                         where: {
@@ -172,11 +176,20 @@ export const HistoriaClinicaRFController = {
                 where: condicion,
                 include: [
                     { model: PacienteModel, as: 'paciente' },
-                    { model: TratamientoModel, as: 'tratamientos' }
+                    { model: TratamientoModel, as: 'tratamientos' },
+                    { model: MedicoModel, as: 'medico', attributes: ['nombres'] }
                 ]
             });
 
-            if (datos.length !== 0) return res.json({ result: datos, code: '201' });
+            const resultado = datos.map((hc) => {
+                const hcJSON = hc.toJSON();
+                if (hcJSON.paciente) {
+                    hcJSON.paciente = descifrarPaciente(hcJSON.paciente);
+                }
+                return hcJSON;
+            });
+
+            if (resultado.length !== 0) return res.json({ result: resultado, code: '201' });
             return res.json({ result: "Datos vacios", code: '202' });
         } catch (error) {
             return res.status(500).json({ error: error.message });
@@ -187,45 +200,61 @@ export const HistoriaClinicaRFController = {
     DatosEstadisticos: async (req, res) => {
         try {
             const { fechaInicial, fechaFinal, especialidad } = req.params;
+            const idMedico = req.user.id_cuenta;
 
-            const historias = await HistoriaClinicaRFModel.findAll({
+            const historiasPropias = await HistoriaClinicaRFModel.findAll({
+                where: { fecha: { [Op.between]: [fechaInicial, fechaFinal] }, id_cuenta_auditoria: idMedico }
+            });
+
+            let pacientesNuevos = 0, pacientesSeguimiento = 0;
+            for (const h of historiasPropias) {
+                const primeraConsulta = await HistoriaClinicaRFModel.findOne({
+                    where: { id_paciente: h.id_paciente },
+                    order: [['fecha', 'ASC'], ['id_rf', 'ASC']]
+                });
+                if (primeraConsulta && String(primeraConsulta.id_rf) === String(h.id_rf)) pacientesNuevos++;
+                else pacientesSeguimiento++;
+            }
+
+            // En Rehabilitación Física no se despachan medicamentos de farmacia;
+            // el equivalente es el plan terapéutico escrito en cada consulta —
+            // ya se cuenta como parte de "pacientesNuevos + pacientesSeguimiento".
+            const tratamientosAplicados = historiasPropias.length;
+
+            let citasAtendidas = 0, citasPendientes = 0;
+            const citas = await CitaModel.findAll({
                 where: { fecha: { [Op.between]: [fechaInicial, fechaFinal] } },
-                include: [{ model: PacienteModel, as: 'paciente' }]
+                include: ['turno']
             });
-
-            let patro = 0, domi = 0, cont = 0, contH = 0, contM = 0;
-            const diaslab = [];
-
-            historias.forEach(item => {
-                if (item.lugar_atencion === 'Patronato') patro++;
-                else domi++;
-
-                if (item.paciente?.gad === true) cont++;
-                if (item.paciente?.sexo === 'Hombre') contH++;
-                if (item.paciente?.sexo === 'Mujer') contM++;
-                if (!diaslab.includes(item.fecha)) diaslab.push(item.fecha);
-            });
-
-            let TotalcitasPendientes = 0;
-            const citas = await CitaModel.findAll({ include: ['turno'] });
             const roles = await RolModel.findAll();
-
             citas.forEach(cita => {
                 if (cita.turno) {
                     const rol = roles.find(r => r.id_rol === cita.turno.id_rol);
-                    if (rol?.rol === especialidad) TotalcitasPendientes++;
+                    if (rol?.rol === especialidad) {
+                        if (String(cita.estado) === '1') citasAtendidas++;
+                        else citasPendientes++;
+                    }
                 }
             });
 
+            const hoyStr = new Date().toISOString().split('T')[0];
+            let proximaCita = null;
+            if (fechaInicial <= hoyStr && hoyStr <= fechaFinal) {
+                const citasHoy = citas
+                    .filter(c => c.fecha === hoyStr && c.turno && roles.find(r => r.id_rol === c.turno.id_rol)?.rol === especialidad && String(c.estado) !== '1')
+                    .sort((a, b) => (a.turno?.hora || '').localeCompare(b.turno?.hora || ''));
+                if (citasHoy.length > 0) {
+                    proximaCita = { hora: citasHoy[0].turno?.hora, nombres: citasHoy[0].nombres };
+                }
+            }
+
             return res.json({
-                totalP: historias.length,
-                totalC: TotalcitasPendientes,
-                totalG: cont,
-                totalH: contH,
-                totalM: contM,
-                patronato: patro,
-                domicilio: domi,
-                horas: diaslab.length
+                citasAtendidas,
+                citasPendientes,
+                pacientesNuevos,
+                pacientesSeguimiento,
+                tratamientosAplicados,
+                proximaCita
             });
         } catch (error) {
             return res.status(500).json({ error: error.message });

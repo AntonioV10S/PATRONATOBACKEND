@@ -32,7 +32,7 @@ function cifrarCamposPersonales({ cedula, telefono, email }) {
   return datos;
 }
 
-function descifrarPaciente(pacienteJSON) {
+export function descifrarPaciente(pacienteJSON) {
   const clave = obtenerClavePersonal();
   const resultado = { ...pacienteJSON };
   try {

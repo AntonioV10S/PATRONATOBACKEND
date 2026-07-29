@@ -210,9 +210,14 @@ ApiRouter.get('/rf/historias/verificar/:id', verificarToken, verificarRol(['Reha
 
 
 // MÓDULO: ADMINISTRACIÓN DE PACIENTES, PARÁMETROS Y TURNOS
-ApiRouter.get('/pacientes', verificarToken, PacienteController.listarPacientes);
+// La lista y el detalle completo de pacientes quedan fuera del alcance del
+// Administrador — su función es que el sistema funcione, no acceder a datos
+// clínicos de pacientes. La búsqueda por cédula (más abajo) queda abierta
+// porque Historial Clínico Completo (función propia de Admin) la usa como
+// utilidad interna para ubicar un paciente, sin exponer su expediente completo.
+ApiRouter.get('/pacientes', verificarToken, verificarRol(['Secretaría', 'Medicina General', 'Rehabilitación Física']), PacienteController.listarPacientes);
 ApiRouter.post('/pacientes', verificarToken, verificarRol(['Secretaría']), PacienteController.crearPaciente);
-ApiRouter.get('/pacientes/:id', verificarToken, PacienteController.obtenerPacientePorId);
+ApiRouter.get('/pacientes/:id', verificarToken, verificarRol(['Secretaría', 'Medicina General', 'Rehabilitación Física']), PacienteController.obtenerPacientePorId);
 ApiRouter.put('/pacientes/:id', verificarToken, verificarRol(['Secretaría']), PacienteController.actualizarPaciente);
 ApiRouter.delete('/pacientes/:id', verificarToken, verificarRol(['Secretaría']), PacienteController.eliminarPaciente);
 ApiRouter.get('/pacientes/cedula/:cedula', verificarToken, PacienteController.buscarPorCedula);

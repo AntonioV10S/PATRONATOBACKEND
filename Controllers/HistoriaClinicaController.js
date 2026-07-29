@@ -9,6 +9,8 @@ import {
     LlaveEccModel
 } from '../Models/index.js';
 import { AsignacionModel } from '../Models/asignaciones.js'; // Asegúrate de que este archivo exista en tu carpeta Models
+import { descifrarPaciente } from './PacienteController.js';
+import { EntregaModel } from '../Models/entrega.js';
 import { CryptoService } from '../utils/cryptoService.js';
 import {
     obtenerLlavePublicaInstitucional,
@@ -118,9 +120,8 @@ export const HistoriaClinicaMGController = {
 
             if (!hc) return res.status(404).json({ message: "Registro clínico no encontrado en el sistema." });
 
-            // Validación de Auditoría Interna: Comprobación de Médico Titular o Reemplazo Vigente
-            // (Administrador siempre tiene acceso, para soporte y supervisión —
-            // igual criterio que en el resto del sistema, ej. Historial Clínico Completo)
+            // Validación de Auditoría Interna: Comprobación de Médico Titular,
+            // colega de la misma especialidad, Reemplazo Vigente, o Administrador.
             // Comparación normalizada a texto: aunque ambas columnas son BIGINT,
             // dependiendo de la capa (Sequelize, el driver de Postgres, la
             // serialización del JWT) uno de los dos valores puede llegar como
@@ -129,8 +130,14 @@ export const HistoriaClinicaMGController = {
             if (String(hc.id_cuenta_auditoria) !== String(id_medico_consulta)) {
                 const rolConsultante = await RolModel.findByPk(req.user?.id_rol);
                 const esAdministrador = rolConsultante && rolConsultante.rol === 'Administrador';
+                // Dentro de la misma especialidad, cualquier médico puede LEER el
+                // registro de un colega para corroborar antecedentes del paciente
+                // (nunca editar — no existe endpoint de edición). Entre
+                // especialidades distintas, se exige una asignación de reemplazo
+                // formal, igual que antes.
+                const esMismaEspecialidad = rolConsultante && rolConsultante.rol === 'Medicina General';
 
-                if (!esAdministrador) {
+                if (!esAdministrador && !esMismaEspecialidad) {
                     const hoy = new Date().toISOString().split('T')[0];
                     const permisoActivo = await AsignacionModel.findOne({
                         where: {
@@ -220,11 +227,23 @@ export const HistoriaClinicaMGController = {
                 where: condicion,
                 include: [
                     { model: PacienteModel, as: 'paciente' },
-                    { model: EnfermedadModel, as: 'enfermedad' }
+                    { model: EnfermedadModel, as: 'enfermedad' },
+                    { model: MedicoModel, as: 'medico', attributes: ['nombres'] }
                 ]
             });
 
-            if (datos.length !== 0) return res.json({ result: datos, code: '201' });
+            // Se descifra la cédula de cada paciente para que la búsqueda por
+            // número funcione en el frontend (la lista solo trae los campos
+            // ya descifrados que necesita mostrar, nunca el criptograma crudo).
+            const resultado = datos.map((hc) => {
+                const hcJSON = hc.toJSON();
+                if (hcJSON.paciente) {
+                    hcJSON.paciente = descifrarPaciente(hcJSON.paciente);
+                }
+                return hcJSON;
+            });
+
+            if (resultado.length !== 0) return res.json({ result: resultado, code: '201' });
             return res.json({ result: "Sin registros clínicos dentro del rango temporal establecido.", code: '202' });
         } catch (error) {
             return res.status(500).json({ error: error.message });
@@ -237,45 +256,75 @@ export const HistoriaClinicaMGController = {
     DatosEstadisticosMG: async (req, res) => {
         try {
             const { fechaInicial, fechaFinal, especialidad } = req.params;
+            const idMedico = req.user.id_cuenta;
 
-            const historias = await HistoriaClinicaMGModel.findAll({
-                where: { fecha: { [Op.between]: [fechaInicial, fechaFinal] } },
-                include: [{ model: PacienteModel, as: 'paciente' }]
+            // Métricas PERSONALES (propias de este médico): pacientes nuevos vs
+            // seguimiento, y recetas emitidas. Se filtran a lo que él mismo
+            // atendió, no al total del sistema.
+            const historiasPropias = await HistoriaClinicaMGModel.findAll({
+                where: { fecha: { [Op.between]: [fechaInicial, fechaFinal] }, id_cuenta_auditoria: idMedico }
             });
 
-            let presunt = 0, defini = 0, cont = 0, contH = 0, contM = 0;
-            const diaslab = [];
+            let pacientesNuevos = 0, pacientesSeguimiento = 0;
+            for (const h of historiasPropias) {
+                // "Nuevo" = esta es la primera consulta de este paciente en todo
+                // el sistema (con cualquier médico); "seguimiento" = ya tenía
+                // historial previo antes de esta fecha.
+                const primeraConsulta = await HistoriaClinicaMGModel.findOne({
+                    where: { id_paciente: h.id_paciente },
+                    order: [['fecha', 'ASC'], ['id_historia_mg', 'ASC']]
+                });
+                if (primeraConsulta && String(primeraConsulta.id_historia_mg) === String(h.id_historia_mg)) pacientesNuevos++;
+                else pacientesSeguimiento++;
+            }
 
-            historias.forEach(item => {
-                if (item.condicion_diagnostico === 'Presuntivo') presunt++;
-                else defini++;
-
-                if (item.paciente?.gad === true) cont++;
-                if (item.paciente?.sexo === 'Hombre') contH++;
-                if (item.paciente?.sexo === 'Mujer') contM++;
-                if (!diaslab.includes(item.fecha)) diaslab.push(item.fecha);
-            });
-
-            let TotalcitasPendientes = 0;
-            const citas = await CitaModel.findAll({ include: ['turno'] });
-            const roles = await RolModel.findAll(); // <-- Corregido de RoleModel a RolModel
-
-            citas.forEach(cita => {
-                if (cita.turno) {
-                    const rol = roles.find(r => r.id_rol === cita.turno.id_rol); // <-- Corregido de id_role a id_rol
-                    if (rol?.rol === especialidad) TotalcitasPendientes++;
+            const idsPacientesAtendidos = [...new Set(historiasPropias.map(h => h.id_paciente))];
+            const recetasEmitidas = idsPacientesAtendidos.length === 0 ? 0 : await EntregaModel.count({
+                where: {
+                    id_paciente: idsPacientesAtendidos,
+                    Fechaentrega: { [Op.between]: [fechaInicial, fechaFinal] }
                 }
             });
 
+            // Métricas de CITAS: la cola de turnos es compartida por especialidad
+            // (cualquier médico de esa especialidad puede atenderlas), así que
+            // aquí sí se cuenta el total de la especialidad, no solo de este médico.
+            let citasAtendidas = 0, citasPendientes = 0;
+            const citas = await CitaModel.findAll({
+                where: { fecha: { [Op.between]: [fechaInicial, fechaFinal] } },
+                include: ['turno']
+            });
+            const roles = await RolModel.findAll();
+            citas.forEach(cita => {
+                if (cita.turno) {
+                    const rol = roles.find(r => r.id_rol === cita.turno.id_rol);
+                    if (rol?.rol === especialidad) {
+                        if (String(cita.estado) === '1') citasAtendidas++;
+                        else citasPendientes++;
+                    }
+                }
+            });
+
+            // Próxima cita del día de hoy para esta especialidad (informativo,
+            // no exclusivo de este médico, ya que la cola es compartida).
+            const hoyStr = new Date().toISOString().split('T')[0];
+            let proximaCita = null;
+            if (fechaInicial <= hoyStr && hoyStr <= fechaFinal) {
+                const citasHoy = citas
+                    .filter(c => c.fecha === hoyStr && c.turno && roles.find(r => r.id_rol === c.turno.id_rol)?.rol === especialidad && String(c.estado) !== '1')
+                    .sort((a, b) => (a.turno?.hora || '').localeCompare(b.turno?.hora || ''));
+                if (citasHoy.length > 0) {
+                    proximaCita = { hora: citasHoy[0].turno?.hora, nombres: citasHoy[0].nombres };
+                }
+            }
+
             return res.json({
-                totalP: historias.length,
-                totalC: TotalcitasPendientes,
-                totalG: cont,
-                totalH: contH,
-                totalM: contM,
-                presuntivo: presunt,
-                definitivo: defini,
-                horas: diaslab.length
+                citasAtendidas,
+                citasPendientes,
+                pacientesNuevos,
+                pacientesSeguimiento,
+                recetasEmitidas,
+                proximaCita
             });
         } catch (error) {
             return res.status(500).json({ error: error.message });
