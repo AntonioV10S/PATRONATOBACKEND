@@ -103,7 +103,7 @@ export const HistoriaClinicaRFController = {
             const id_medico_consulta = req.user.id_cuenta;
 
             const hc = await HistoriaClinicaRFModel.findByPk(id, {
-                include: [{ model: ContenidoCifradoRFModel, as: 'contenidoCifrado' }]
+                include: [{ model: ContenidoCifradoRFModel, as: 'contenidoCifradoRF' }]
             });
 
             if (!hc) return res.status(404).json({ message: "Registro clínico no encontrado." });
@@ -132,7 +132,7 @@ export const HistoriaClinicaRFController = {
             }
 
             const llavePrivadaInstitucional = obtenerLlavePrivadaInstitucional();
-            const datosDescifradosStr = CryptoService.descifrarConECDH(hc.contenidoCifrado.payload_clinico_rf, llavePrivadaInstitucional);
+            const datosDescifradosStr = CryptoService.descifrarConECDH(hc.contenidoCifradoRF.payload_clinico_rf, llavePrivadaInstitucional);
 
             return res.json({
                 result: {
@@ -266,14 +266,14 @@ export const HistoriaClinicaRFController = {
         try {
             const { id } = req.params;
             const hc = await HistoriaClinicaRFModel.findByPk(id, {
-                include: [{ model: ContenidoCifradoRFModel, as: 'contenidoCifrado' }]
+                include: [{ model: ContenidoCifradoRFModel, as: 'contenidoCifradoRF' }]
             });
 
-            if (!hc || !hc.contenidoCifrado) {
+            if (!hc || !hc.contenidoCifradoRF) {
                 return res.status(404).json({ message: "Incapacidad de auditoría: Registro o criptograma faltante." });
             }
 
-            const hashCalculado = CryptoService.calcularHashSHA256(hc.contenidoCifrado.payload_clinico_rf);
+            const hashCalculado = CryptoService.calcularHashSHA256(hc.contenidoCifradoRF.payload_clinico_rf);
             const hashIntegro = hashCalculado === hc.hash_integridad;
 
             let firmaValida = false;
@@ -312,7 +312,7 @@ export const HistoriaClinicaRFController = {
         try {
             const historias = await HistoriaClinicaRFModel.findAll({
                 include: [
-                    { model: ContenidoCifradoRFModel, as: 'contenidoCifrado' },
+                    { model: ContenidoCifradoRFModel, as: 'contenidoCifradoRF' },
                     { model: PacienteModel, as: 'paciente', attributes: ['nombres', 'apellidos'] },
                     { model: MedicoModel, as: 'medico', attributes: ['nombres'] }
                 ],
@@ -332,11 +332,11 @@ export const HistoriaClinicaRFController = {
                     medico: hc.medico?.nombres || '—'
                 };
 
-                if (!hc.contenidoCifrado) {
+                if (!hc.contenidoCifradoRF) {
                     return { ...base, estado: 'Sin contenido', detalle: 'No existe el bloque cifrado asociado.' };
                 }
 
-                const hashCalculado = CryptoService.calcularHashSHA256(hc.contenidoCifrado.payload_clinico_rf);
+                const hashCalculado = CryptoService.calcularHashSHA256(hc.contenidoCifradoRF.payload_clinico_rf);
                 const hashIntegro = hashCalculado === hc.hash_integridad;
                 const firmaValida = (hc.llave_publica_pem && hc.firma_ecdsa)
                     ? CryptoService.verificarFirma(hc.hash_integridad, hc.firma_ecdsa, hc.llave_publica_pem)
@@ -351,7 +351,7 @@ export const HistoriaClinicaRFController = {
 
                 try {
                     if (!llavePrivadaInstitucional) throw new Error('Llave institucional no configurada');
-                    CryptoService.descifrarConECDH(hc.contenidoCifrado.payload_clinico_rf, llavePrivadaInstitucional);
+                    CryptoService.descifrarConECDH(hc.contenidoCifradoRF.payload_clinico_rf, llavePrivadaInstitucional);
                     return { ...base, estado: 'Íntegro', detalle: 'Hash correcto, firma válida, y descifrable con la llave actual.' };
                 } catch (e) {
                     return { ...base, estado: 'No descifrable', detalle: 'Hash y firma correctos, pero no se puede leer con la llave institucional actual (posible pérdida de una llave anterior).' };
