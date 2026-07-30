@@ -196,19 +196,19 @@ ApiRouter.delete('/clinico/examen-organo-sistema/:id', verificarToken, ExamenOrg
 
 // --- REHABILITACIÓN FÍSICA ---
 ApiRouter.post('/mg/historias', verificarToken, verificarRol(['Medicina General']), HistoriaClinicaMGController.crearHistoria);
-ApiRouter.get('/mg/historias/:id', verificarToken, verificarRol(['Medicina General']), HistoriaClinicaMGController.obtenerHistoria);
-ApiRouter.get('/mg/historias/verificar/:id', verificarToken, verificarRol(['Medicina General']), HistoriaClinicaMGController.verificarIntegridad);
 ApiRouter.get('/mg/historias/verificar-todas', verificarToken, verificarAdmin, HistoriaClinicaMGController.verificarTodas);
+ApiRouter.get('/mg/historias/verificar/:id', verificarToken, verificarRol(['Medicina General']), HistoriaClinicaMGController.verificarIntegridad);
+ApiRouter.get('/mg/historias/:id', verificarToken, verificarRol(['Medicina General']), HistoriaClinicaMGController.obtenerHistoria);
 ApiRouter.get('/mg/pacientes/consultas/:id', verificarToken, verificarRol(['Medicina General', 'Administrador']), HistoriaClinicaMGController.ConsultasPacientesMG);
 ApiRouter.get('/mg/historias/rango/:fechaInicial/:fechaFinal', verificarToken, verificarRol(['Medicina General']), HistoriaClinicaMGController.FiltradoFechaMG);
 ApiRouter.get('/mg/estadisticas/:fechaInicial/:fechaFinal/:especialidad', verificarToken, verificarRol(['Medicina General']), HistoriaClinicaMGController.DatosEstadisticosMG);
 ApiRouter.post('/rf/historias', verificarToken, verificarRol(['Rehabilitación Física']), HistoriaClinicaRFController.store);
+ApiRouter.get('/rf/historias/verificar-todas', verificarToken, verificarAdmin, HistoriaClinicaRFController.verificarTodas);
+ApiRouter.get('/rf/historias/verificar/:id', verificarToken, verificarRol(['Rehabilitación Física']), HistoriaClinicaRFController.verificarIntegridad);
 ApiRouter.get('/rf/historias/:id', verificarToken, verificarRol(['Rehabilitación Física']), HistoriaClinicaRFController.show);
 ApiRouter.get('/rf/pacientes/consultas/:id', verificarToken, verificarRol(['Rehabilitación Física', 'Administrador']), HistoriaClinicaRFController.ConsultasPacientesRF);
 ApiRouter.get('/rf/historias/rango/:fechaInicial/:fechaFinal', verificarToken, verificarRol(['Rehabilitación Física']), HistoriaClinicaRFController.FiltradoFecha);
 ApiRouter.get('/rf/estadisticas/:fechaInicial/:fechaFinal/:especialidad', verificarToken, verificarRol(['Rehabilitación Física']), HistoriaClinicaRFController.DatosEstadisticos);
-ApiRouter.get('/rf/historias/verificar/:id', verificarToken, verificarRol(['Rehabilitación Física']), HistoriaClinicaRFController.verificarIntegridad);
-ApiRouter.get('/rf/historias/verificar-todas', verificarToken, verificarAdmin, HistoriaClinicaRFController.verificarTodas);
 
 
 // MÓDULO: ADMINISTRACIÓN DE PACIENTES, PARÁMETROS Y TURNOS
