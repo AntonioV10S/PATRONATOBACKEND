@@ -17,7 +17,9 @@ async function buscarPacientePorCedula(cedula) {
 export const CitaController = {
     async index(req, res) {
         try {
-            const datos = await CitaModel.findAll({ include: [{ model: TurnoModel, as: 'turno' }] });
+            const datos = await CitaModel.findAll({
+                include: [{ model: TurnoModel, as: 'turno', include: [{ model: RolModel, as: 'rol' }] }]
+            });
             const num_rows = datos.length;
             if (num_rows !== 0) {
                 return res.status(200).json({ result: datos });
@@ -156,10 +158,7 @@ export const CitaController = {
             const { id } = req.params;
             const datos = await CitaModel.findOne({
                 where: { id_cita: id },
-                include: [
-                    { model: TurnoModel, as: 'turno' },
-                    { model: RolModel, as: 'rol' }
-                ]
+                include: [{ model: TurnoModel, as: 'turno', include: [{ model: RolModel, as: 'rol' }] }]
             });
 
             if (datos !== null) {
